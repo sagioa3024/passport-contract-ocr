@@ -93,10 +93,7 @@ $today = date('Y-m-d');
                 Номер договора
                 <input name="contract_number" value="1">
               </label>
-              <label>
-                Город
-                <input name="city" value="Москва">
-              </label>
+              <input name="city" type="hidden" value="Новороссийск">
             </div>
 
             <label class="checkbox">
