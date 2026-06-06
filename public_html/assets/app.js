@@ -148,7 +148,9 @@ recognizeBtn.addEventListener('click', async () => {
       }
     });
 
-    aiStatus.textContent = 'ИИ распознавание подключено';
+    if (aiStatus) {
+      aiStatus.textContent = 'ИИ распознавание подключено';
+    }
     recognizeMessage.textContent = 'Готово. Проверьте поля перед созданием договора.';
   } catch (error) {
     recognizeMessage.textContent = error.message;
