@@ -16,11 +16,11 @@ jobs:
       - name: Deploy public_html to Beget
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
-          server: ${{ secrets.BEGET_FTP_SERVER }}
-          username: ${{ secrets.BEGET_FTP_USERNAME }}
+          server: ${{ secrets.BEGET_FTP_SERVER || 'osagitop.beget.tech' }}
+          username: ${{ secrets.BEGET_FTP_USERNAME || 'osagitop_login' }}
           password: ${{ secrets.BEGET_FTP_PASSWORD }}
           local-dir: ./public_html/
-          server-dir: ${{ secrets.BEGET_FTP_SERVER_DIR }}
+          server-dir: ${{ secrets.BEGET_FTP_SERVER_DIR || '/public_html/contract/' }}
           exclude: |
             **/.git*
             **/.git*/**
