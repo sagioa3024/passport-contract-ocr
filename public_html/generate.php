@@ -166,6 +166,20 @@ function openTemplateArchive($zip, $templatePath)
         return true;
     }
 
+    if (is_readable($templatePath)) {
+        $localBytes = @file_get_contents($templatePath);
+        if ($localBytes !== false && strlen($localBytes) > 1000) {
+            $localFallbackPath = sys_get_temp_dir() . '/contract_template_local_' . md5($localBytes) . '.docx';
+            if (file_put_contents($localFallbackPath, $localBytes) !== false) {
+                $localResult = @$zip->open($localFallbackPath);
+                if ($localResult === true) {
+                    return true;
+                }
+                $result = $localResult;
+            }
+        }
+    }
+
     $rawUrl = 'https://raw.githubusercontent.com/sagioa3024/passport-contract-ocr/main/public_html/contract_template.docx';
     $rawBytes = @file_get_contents($rawUrl);
     if ($rawBytes !== false && strlen($rawBytes) > 1000) {
@@ -175,6 +189,7 @@ function openTemplateArchive($zip, $templatePath)
             if ($rawResult === true) {
                 return true;
             }
+            $result = $rawResult;
         }
     }
 
@@ -194,7 +209,8 @@ function openTemplateArchive($zip, $templatePath)
         return $result;
     }
 
-    return @$zip->open($fallbackPath);
+    $base64Result = @$zip->open($fallbackPath);
+    return $base64Result === true ? true : $base64Result;
 }
 
 if (empty($_POST['consent'])) {
