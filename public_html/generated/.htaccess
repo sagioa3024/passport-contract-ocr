@@ -1,0 +1,5 @@
+Options -Indexes
+
+<FilesMatch "\.(docx)$">
+  Require all denied
+</FilesMatch>
