@@ -12,14 +12,6 @@ $today = date('Y-m-d');
 <body>
   <main class="app-shell">
     <section class="workspace">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">MVP</p>
-          <h1>Договор по данным паспорта</h1>
-        </div>
-        <span class="status" id="aiStatus">ИИ выключен, пока не задан API-ключ</span>
-      </header>
-
       <div class="notice">
         Загружайте документ только с согласия человека. Фото используется для распознавания и не должно храниться дольше, чем нужно для создания договора.
       </div>
@@ -94,11 +86,6 @@ $today = date('Y-m-d');
             <label>
               Адрес регистрации: город, улица, дом, квартира
               <textarea name="registration_address" rows="3"></textarea>
-            </label>
-
-            <label>
-              Телефон для договора
-              <input name="phone" type="tel" placeholder="+7">
             </label>
 
             <div class="grid two">
