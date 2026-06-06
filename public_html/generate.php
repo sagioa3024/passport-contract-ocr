@@ -119,6 +119,16 @@ function replaceParagraphText($paragraph, $text)
     }
 }
 
+function hasAllText($text, $needles)
+{
+    foreach ($needles as $needle) {
+        if (strpos($text, $needle) === false) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function fillDocumentXml($xml, $data)
 {
     $dom = new DOMDocument();
@@ -130,12 +140,12 @@ function fillDocumentXml($xml, $data)
     foreach ($paragraphs as $paragraph) {
         $text = paragraphText($paragraph);
 
-        if (strpos($text, 'г. Новороссийск') !== false && strpos($text, '10 января 2026') !== false) {
+        if (hasAllText($text, array('г. Новороссийск', '10 января 2026')) || strpos($text, '10 января 2026г') !== false) {
             replaceParagraphText($paragraph, 'г. ' . $data['city'] . "\t\t\t\t\t" . $data['contract_date'] . ' г.');
             continue;
         }
 
-        if (strpos($text, 'гр. РФ Петров Петр Петрович') !== false) {
+        if (hasAllText($text, array('гр. РФ', 'Петров Петр Петрович')) || hasAllText($text, array('паспорт серия', 'проживающий'))) {
             replaceParagraphText($paragraph, $data['customer_paragraph']);
             continue;
         }
@@ -162,18 +172,25 @@ if ($fullName === '') {
     exit;
 }
 
-$city = value('city') !== '' ? value('city') : 'Новороссийск';
+$city = 'Новороссийск';
 $contractDate = contractDateText(value('contract_date'));
 $birthDate = humanDate(value('birth_date'));
 $issueDate = value('issue_date');
 $series = value('passport_series');
 $number = value('passport_number');
 $issuedBy = value('issued_by');
+$departmentCode = value('department_code');
 $address = value('registration_address');
 $birthPlace = value('birth_place');
 $phone = value('phone');
 
-$customerParagraph = 'Индивидуальный предприниматель Финтисов Михаил Сергеевич (Учебный центр РОСТ) ОГРНИП 318237500147635, ИНН 231501144923 Регистрационный номер лицензии на образовательную деятельность № Л035-01218-23/00243153 от 03.02.2021, именуемый в дальнейшем «Исполнитель», с одной стороны, и гр. РФ ' . $fullName . ' ' . $birthDate . ' года рождения, место рождения ' . $birthPlace . ', паспорт серия ' . $series . ' №' . $number . ', выдан ' . quotedDate($issueDate) . ' года, ' . $issuedBy . ', проживающий(ая) по адресу ' . $address . ', телефон: ' . ($phone !== '' ? $phone : '______________') . ', именуемый в дальнейшем «Заказчик», с другой стороны заключили между собой настоящий договор о нижеследующем.';
+$passportDetails = 'паспорт серия ' . ($series !== '' ? $series : '__________') . ' №' . ($number !== '' ? $number : '____________');
+$issuedDetails = 'выдан ' . quotedDate($issueDate) . ' года, ' . ($issuedBy !== '' ? $issuedBy : '_______________________');
+if ($departmentCode !== '') {
+    $issuedDetails .= ', код подразделения ' . $departmentCode;
+}
+
+$customerParagraph = 'Индивидуальный предприниматель Финтисов Михаил Сергеевич (Учебный центр РОСТ) ОГРНИП 318237500147635, ИНН 231501144923 Регистрационный номер лицензии на образовательную деятельность № Л035-01218-23/00243153 от 03.02.2021, именуемый в дальнейшем «Исполнитель», с одной стороны, и гр. РФ ' . $fullName . ' ' . ($birthDate !== '' ? $birthDate : '_______') . ' года рождения, место рождения ' . ($birthPlace !== '' ? $birthPlace : '_______________') . ', ' . $passportDetails . ', ' . $issuedDetails . ', проживающий(ая) по адресу ' . ($address !== '' ? $address : '______________________________') . ', телефон: ' . ($phone !== '' ? $phone : '______________') . ', именуемый в дальнейшем «Заказчик», с другой стороны заключили между собой настоящий договор о нижеследующем.';
 
 $templatePath = __DIR__ . '/contract_template.docx';
 if (!file_exists($templatePath)) {
@@ -183,19 +200,39 @@ if (!file_exists($templatePath)) {
 }
 
 $generatedDir = __DIR__ . '/generated';
-if (!is_dir($generatedDir)) {
-    mkdir($generatedDir, 0755, true);
+if (!is_dir($generatedDir) && !mkdir($generatedDir, 0755, true)) {
+    setStatus(500);
+    echo 'Не удалось создать папку для готовых договоров.';
+    exit;
+}
+if (!is_writable($generatedDir)) {
+    setStatus(500);
+    echo 'Папка для готовых договоров недоступна для записи.';
+    exit;
 }
 
 $safeName = safeFilenamePart($fullName);
 $filename = 'contract_' . $safeName . '_' . date('Ymd_His') . '.docx';
 $path = $generatedDir . '/' . $filename;
 
+if (!class_exists('ZipArchive')) {
+    setStatus(500);
+    echo 'На сервере не подключено PHP-расширение ZipArchive для создания DOCX.';
+    exit;
+}
+
 $source = new ZipArchive();
-$target = new ZipArchive();
-if ($source->open($templatePath) !== true || $target->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+if ($source->open($templatePath) !== true) {
     setStatus(500);
     echo 'Не удалось открыть шаблон договора.';
+    exit;
+}
+
+$target = new ZipArchive();
+if ($target->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+    $source->close();
+    setStatus(500);
+    echo 'Не удалось создать готовый договор.';
     exit;
 }
 
