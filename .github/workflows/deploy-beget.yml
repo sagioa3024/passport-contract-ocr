@@ -17,7 +17,7 @@ jobs:
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: osagitop.beget.tech
-          username: osagitop_login
+          username: osagitop_1
           password: ${{ secrets.BEGET_FTP_PASSWORD }}
           local-dir: ./public_html/
           server-dir: /public_html/contract/
