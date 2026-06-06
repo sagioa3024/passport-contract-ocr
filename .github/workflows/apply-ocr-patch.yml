@@ -1,0 +1,329 @@
+name: apply-ocr-patch
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply OCR patch
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('public_html/api/recognize.php')
+          text = path.read_text(encoding='utf-8')
+
+          if 'function textLength(' not in text:
+              text = text.replace("""function onlyDigits($value)
+{
+    return preg_replace('/\\D+/', '', $value);
+}
+""", """function onlyDigits($value)
+{
+    return preg_replace('/\\D+/', '', $value);
+}
+
+function textLength($value)
+{
+    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+}
+""")
+
+          if 'function buildPreparedImageContents(' not in text:
+              helpers = r'''
+function buildImageContentFromBytes($bytes, $mime)
+{
+    return array(
+        'type' => 'input_image',
+        'image_url' => 'data:' . $mime . ';base64,' . base64_encode($bytes),
+        'detail' => 'high',
+    );
+}
+
+function imageFromUpload($path, $mime)
+{
+    if (!function_exists('imagecreatefromjpeg')) {
+        return null;
+    }
+
+    if ($mime === 'image/jpeg') {
+        return @imagecreatefromjpeg($path);
+    }
+    if ($mime === 'image/png' && function_exists('imagecreatefrompng')) {
+        return @imagecreatefrompng($path);
+    }
+    if ($mime === 'image/webp' && function_exists('imagecreatefromwebp')) {
+        return @imagecreatefromwebp($path);
+    }
+
+    return null;
+}
+
+function cloneImage($image)
+{
+    $width = imagesx($image);
+    $height = imagesy($image);
+    $copy = imagecreatetruecolor($width, $height);
+    imagecopy($copy, $image, 0, 0, 0, 0, $width, $height);
+    return $copy;
+}
+
+function scaleImageToMax($image, $maxSide)
+{
+    $width = imagesx($image);
+    $height = imagesy($image);
+    $largest = max($width, $height);
+    if ($largest <= $maxSide) {
+        return cloneImage($image);
+    }
+
+    $ratio = $maxSide / $largest;
+    $newWidth = max(1, (int)round($width * $ratio));
+    $newHeight = max(1, (int)round($height * $ratio));
+    if (function_exists('imagescale')) {
+        return imagescale($image, $newWidth, $newHeight, IMG_BICUBIC);
+    }
+
+    $resized = imagecreatetruecolor($newWidth, $newHeight);
+    imagecopyresampled($resized, $image, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
+    return $resized;
+}
+
+function enhanceForOcr($image)
+{
+    $copy = cloneImage($image);
+    imagefilter($copy, IMG_FILTER_GRAYSCALE);
+    imagefilter($copy, IMG_FILTER_CONTRAST, -35);
+    imagefilter($copy, IMG_FILTER_BRIGHTNESS, 8);
+    if (function_exists('imageconvolution')) {
+        imageconvolution($copy, array(
+            array(-1, -1, -1),
+            array(-1, 16, -1),
+            array(-1, -1, -1),
+        ), 8, 0);
+    }
+    return $copy;
+}
+
+function jpegBytes($image)
+{
+    ob_start();
+    imagejpeg($image, null, 88);
+    return ob_get_clean();
+}
+
+function buildPreparedImageContents($file, $mime)
+{
+    $contents = array();
+    $originalBytes = file_get_contents($file['tmp_name']);
+    if ($originalBytes !== false) {
+        $contents[] = buildImageContentFromBytes($originalBytes, $mime);
+    }
+
+    $source = imageFromUpload($file['tmp_name'], $mime);
+    if (!$source) {
+        return $contents;
+    }
+
+    $base = scaleImageToMax($source, 2200);
+    $variants = array();
+    $variants[] = enhanceForOcr($base);
+    $variants[] = imagerotate(enhanceForOcr($base), 90, 255);
+    $variants[] = imagerotate(enhanceForOcr($base), 180, 255);
+    $variants[] = imagerotate(enhanceForOcr($base), 270, 255);
+
+    foreach ($variants as $variant) {
+        if ($variant) {
+            $contents[] = buildImageContentFromBytes(jpegBytes($variant), 'image/jpeg');
+            imagedestroy($variant);
+        }
+    }
+
+    imagedestroy($base);
+    imagedestroy($source);
+
+    return $contents;
+}
+
+function buildPreparedFileContents($file, $mime)
+{
+    if ($mime === 'application/pdf') {
+        return array(buildFileContent($file, $mime));
+    }
+    return buildPreparedImageContents($file, $mime);
+}
+'''
+              text = text.replace('\nfunction responseOutputText($response)', helpers + '\nfunction responseOutputText($response)', 1)
+
+          if "'max_output_tokens' => 2000" not in text:
+              text = text.replace("""        ),
+    );
+
+    $ch = curl_init('https://api.openai.com/v1/responses');
+""", """        ),
+        'max_output_tokens' => 2000,
+    );
+
+    if (preg_match('/^gpt-5/i', $model)) {
+        $payload['reasoning'] = array('effort' => 'high');
+    }
+
+    $ch = curl_init('https://api.openai.com/v1/responses');
+""", 1)
+
+          if 'function requestBestData(' not in text:
+              model_helpers = r'''
+function modelCandidates($preferred)
+{
+    $candidates = array($preferred, 'gpt-5.2', 'gpt-5.1', 'gpt-5', 'gpt-4.1');
+    $unique = array();
+    foreach ($candidates as $candidate) {
+        $candidate = trim((string)$candidate);
+        if ($candidate !== '' && !in_array($candidate, $unique, true)) {
+            $unique[] = $candidate;
+        }
+    }
+    return $unique;
+}
+
+function fieldScore($data)
+{
+    if (!is_array($data)) {
+        return -1;
+    }
+    $score = 0;
+    foreach (array('full_name', 'birth_date', 'birth_place', 'passport_series', 'passport_number', 'issued_by', 'issue_date', 'department_code', 'registration_address') as $key) {
+        if (isset($data[$key]) && trim((string)$data[$key]) !== '') {
+            $score++;
+        }
+    }
+    if (isset($data['passport_series']) && preg_match('/^\d{4}$/', onlyDigits($data['passport_series']))) {
+        $score += 2;
+    }
+    if (isset($data['passport_number']) && preg_match('/^\d{6}$/', onlyDigits($data['passport_number']))) {
+        $score += 2;
+    }
+    if (isset($data['registration_address']) && preg_match('/(ул|улица|просп|пер|дом|д\.|кв|квартира)/iu', $data['registration_address'])) {
+        $score += 2;
+    }
+    return $score;
+}
+
+function requestBestData($apiKey, $preferredModel, $contentParts, $schema, &$error, &$usedModel)
+{
+    $best = null;
+    $bestScore = -1;
+    $lastError = '';
+
+    foreach (modelCandidates($preferredModel) as $candidate) {
+        $candidateError = '';
+        $data = requestPassportData($apiKey, $candidate, $contentParts, $schema, $candidateError);
+        if (is_array($data)) {
+            $score = fieldScore($data);
+            if ($score > $bestScore) {
+                $best = $data;
+                $bestScore = $score;
+                $usedModel = $candidate;
+            }
+            if (!needsStrongerOcr($data)) {
+                return $data;
+            }
+        } elseif ($candidateError !== '') {
+            $lastError = $candidateError;
+        }
+    }
+
+    $error = $best ? '' : $lastError;
+    return $best;
+}
+
+function requestAddressData($apiKey, $preferredModel, $contentParts, $schema, &$error)
+{
+    foreach (modelCandidates($preferredModel) as $candidate) {
+        $candidateError = '';
+        $data = requestPassportData($apiKey, $candidate, $contentParts, $schema, $candidateError);
+        if (is_array($data)) {
+            return $data;
+        }
+        if ($candidateError !== '') {
+            $error = $candidateError;
+        }
+    }
+    return null;
+}
+'''
+              text = text.replace('\nfunction needsStrongerOcr($data)', model_helpers + '\nfunction needsStrongerOcr($data)', 1)
+
+          text = text.replace("$model = 'gpt-5';", "$model = 'gpt-5.2';")
+
+          prompt_block = """$contentParts = array();
+$contentParts[] = array(
+    'type' => 'input_text',
+    'text' => "You are a meticulous OCR and document-understanding system for Russian internal passports. The input may include several files and each file may contain multiple passport fragments on one sheet. Use every visual variant provided: original, contrast-enhanced, grayscale, and rotated copies. First map the whole page layout, then inspect every passport fragment at 0, 90, 180, and 270 degrees. Extract all visible fields from the same Russian passport and merge them. Never invent values; use empty string only when truly unreadable. Field rules: full_name = surname + name + patronymic from identity page near photo. birth_date and issue_date = YYYY-MM-DD. birth_place = full visible place of birth. passport_series = exactly 4 digits; passport_number = exactly 6 digits; series/number are often red, vertical, or on the page margin. If 10 consecutive passport digits are visible, first 4 are series and last 6 are number. issued_by = full authority line(s), not shortened. department_code = 000-000. registration_address = only city/locality, street, house, building/corpus/structure, apartment. Registration stamps vary; read both printed and handwritten text. For address, deliberately separate date-like groups from address numbers: registration/propiska dates such as 26 04 2002, 26.04.2002, 07.04.2006, 2002, 2006 must be ignored and never used as house/apartment. House is usually near labels дом, д., house, home, or immediately after street. Apartment is usually near labels кв., квартира, apt, apartment, or on the same line/level as house at the right side of the stamp. If an apartment number is visible, include it. Return strict JSON only."
+);
+"""
+          text = re.sub(r"\$contentParts = array\(\);\n\$contentParts\[\] = array\(\n    'type' => 'input_text',\n    'text' => '.*?'\n\);\n", prompt_block, text, count=1, flags=re.S)
+
+          text = text.replace("""    $contentParts[] = buildFileContent($file, $mime);
+""", """    foreach (buildPreparedFileContents($file, $mime) as $preparedContent) {
+        $contentParts[] = $preparedContent;
+    }
+""")
+
+          text = re.sub(r"\$error = '';\n\$data = requestPassportData\(\$apiKey, \$model, \$contentParts, \$schema, \$error\);\nif \(is_array\(\$data\) && \$model !== 'gpt-5' && needsStrongerOcr\(\$data\)\) \{.*?\n\}\n\nif \(!is_array\(\$data\)\)", "$error = '';\n$usedModel = '';\n$data = requestBestData($apiKey, $model, $contentParts, $schema, $error, $usedModel);\n\nif (!is_array($data))", text, count=1, flags=re.S)
+
+          if '$addressSchema = array(' not in text:
+              address_block = r'''
+$addressSchema = array(
+    'type' => 'object',
+    'additionalProperties' => false,
+    'properties' => array(
+        'registration_address' => array('type' => 'string'),
+    ),
+    'required' => array('registration_address'),
+);
+$addressParts = $contentParts;
+$addressParts[0] = array(
+    'type' => 'input_text',
+    'text' => 'Address-only OCR pass for Russian passport registration stamps. Inspect every original/enhanced/rotated image variant. Find only the registration address, including city/locality, street, house, building/corpus/structure, and apartment. Stamps may be upside down, rotated 90 degrees, handwritten, faint, overexposed, or on the right side of a copy sheet. Ignore all registration dates and cancellation dates. Dates can appear as separate groups like 26 04 2002, 26.04.2002, 07 04 2006, 2006. These are not house or apartment. House usually follows дом or д. Apartment usually follows кв. or квартира and can be at the far right of the same line as the house. If you see кв/квартира plus a number, include the apartment. Return only strict JSON.'
+);
+$addressError = '';
+$addressData = requestAddressData($apiKey, $usedModel !== '' ? $usedModel : $model, $addressParts, $addressSchema, $addressError);
+if (is_array($addressData) && isset($addressData['registration_address'])) {
+    $specialAddress = cleanRegistrationAddress($addressData['registration_address']);
+    $currentAddress = isset($data['registration_address']) ? cleanRegistrationAddress($data['registration_address']) : '';
+    if (textLength($specialAddress) >= textLength($currentAddress)) {
+        $data['registration_address'] = $specialAddress;
+    }
+}
+
+'''
+              text = text.replace("if (isset($data['registration_address'])) {", address_block + "if (isset($data['registration_address'])) {", 1)
+
+          path.write_text(text, encoding='utf-8')
+
+          cfg = Path('public_html/config.example.php')
+          if cfg.exists():
+              cfg_text = cfg.read_text(encoding='utf-8').replace("'openai_model' => 'gpt-5'", "'openai_model' => 'gpt-5.2'")
+              cfg.write_text(cfg_text, encoding='utf-8')
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public_html/api/recognize.php public_html/config.example.php
+          if git diff --cached --quiet; then
+            echo "No OCR patch changes"
+            exit 0
+          fi
+          git commit -m "Apply strengthened OCR preprocessing"
+          git push
