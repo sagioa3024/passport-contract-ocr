@@ -1,0 +1,14 @@
+Options -Indexes
+AddDefaultCharset UTF-8
+
+AuthType None
+Require all granted
+
+<Files "config.php">
+  Require all denied
+</Files>
+
+<IfModule mod_headers.c>
+  Header set X-Content-Type-Options "nosniff"
+  Header set Referrer-Policy "same-origin"
+</IfModule>
