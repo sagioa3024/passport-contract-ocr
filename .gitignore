@@ -1,0 +1,19 @@
+# Local secrets
+public_html/config.php
+.env
+*.env
+
+# Runtime files on hosting
+public_html/uploads/*
+!public_html/uploads/.htaccess
+public_html/generated/*
+!public_html/generated/.htaccess
+
+# Local working artifacts
+work/
+outputs/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.tmp
