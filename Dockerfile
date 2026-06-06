@@ -14,7 +14,7 @@ RUN mkdir -p /var/www/html/uploads /var/www/html/generated \
 
 EXPOSE 10000
 
-CMD printf "%s\n" "<?php" "return array(" "    'openai_api_key' => getenv('OPENAI_API_KEY') ?: ''," "    'openai_model' => getenv('OPENAI_MODEL') ?: 'gpt-4.1'," "    'max_upload_mb' => 20," ");" > /var/www/html/config.php \
+CMD printf "%s\n" "<?php" "return array(" "    'openai_api_key' => getenv('OPENAI_API_KEY') ?: ''," "    'openai_model' => getenv('OPENAI_MODEL') ?: 'gpt-5'," "    'max_upload_mb' => 20," ");" > /var/www/html/config.php \
     && chown www-data:www-data /var/www/html/config.php \
     && sed -i "s/Listen 80/Listen ${PORT:-10000}/" /etc/apache2/ports.conf \
     && sed -i "s/:80>/:${PORT:-10000}>/" /etc/apache2/sites-available/000-default.conf \
