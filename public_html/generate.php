@@ -197,6 +197,56 @@ function openTemplateArchive($zip, $templatePath)
     return $zip->open($fallbackPath);
 }
 
+function docxText($text)
+{
+    return htmlspecialchars($text, ENT_XML1 | ENT_COMPAT, 'UTF-8');
+}
+
+function docxParagraph($text, $bold = false)
+{
+    $runProps = $bold ? '<w:rPr><w:b/></w:rPr>' : '';
+    return '<w:p><w:r>' . $runProps . '<w:t xml:space="preserve">' . docxText($text) . '</w:t></w:r></w:p>';
+}
+
+function createFallbackDocx($path, $data)
+{
+    $zip = new ZipArchive();
+    if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        return false;
+    }
+
+    $documentXml =
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' .
+        '<w:body>' .
+        docxParagraph('Договор на оказание платных образовательных услуг', true) .
+        docxParagraph('г. ' . $data['city'] . '     ' . $data['contract_date'] . ' г.') .
+        docxParagraph($data['customer_paragraph']) .
+        docxParagraph('') .
+        docxParagraph('Заказчик\Слушатель     ____________ /' . $data['signature'] . '/') .
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr>' .
+        '</w:body></w:document>';
+
+    $zip->addFromString('[Content_Types].xml',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' .
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' .
+        '<Default Extension="xml" ContentType="application/xml"/>' .
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' .
+        '</Types>'
+    );
+    $zip->addFromString('_rels/.rels',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' .
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' .
+        '</Relationships>'
+    );
+    $zip->addFromString('word/document.xml', $documentXml);
+    $zip->close();
+
+    return true;
+}
+
 if (empty($_POST['consent'])) {
     setStatus(400);
     echo 'Нужно подтвердить согласие и проверку данных.';
@@ -261,20 +311,6 @@ if (!class_exists('ZipArchive')) {
 
 $source = new ZipArchive();
 $templateOpenResult = openTemplateArchive($source, $templatePath);
-if ($templateOpenResult !== true) {
-    setStatus(500);
-    echo 'Не удалось открыть шаблон договора. Код: ' . $templateOpenResult;
-    exit;
-}
-
-$target = new ZipArchive();
-if ($target->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-    $source->close();
-    setStatus(500);
-    echo 'Не удалось создать готовый договор.';
-    exit;
-}
-
 $data = array(
     'city' => $city,
     'contract_date' => $contractDate,
@@ -282,17 +318,33 @@ $data = array(
     'signature' => signatureName($fullName),
 );
 
-for ($i = 0; $i < $source->numFiles; $i++) {
-    $name = $source->getNameIndex($i);
-    $content = $source->getFromIndex($i);
-    if ($name === 'word/document.xml') {
-        $content = fillDocumentXml($content, $data);
+if ($templateOpenResult !== true) {
+    if (!createFallbackDocx($path, $data)) {
+        setStatus(500);
+        echo 'Не удалось открыть шаблон договора и создать запасной DOCX. Код шаблона: ' . $templateOpenResult;
+        exit;
     }
-    $target->addFromString($name, $content);
-}
+} else {
+    $target = new ZipArchive();
+    if ($target->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        $source->close();
+        setStatus(500);
+        echo 'Не удалось создать готовый договор.';
+        exit;
+    }
 
-$source->close();
-$target->close();
+    for ($i = 0; $i < $source->numFiles; $i++) {
+        $name = $source->getNameIndex($i);
+        $content = $source->getFromIndex($i);
+        if ($name === 'word/document.xml') {
+            $content = fillDocumentXml($content, $data);
+        }
+        $target->addFromString($name, $content);
+    }
+
+    $source->close();
+    $target->close();
+}
 
 header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
 header('Content-Disposition: attachment; filename="' . $filename . '"');
