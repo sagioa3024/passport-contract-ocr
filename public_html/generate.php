@@ -159,6 +159,44 @@ function fillDocumentXml($xml, $data)
     return $dom->saveXML();
 }
 
+function openTemplateArchive($zip, $templatePath)
+{
+    $result = $zip->open($templatePath);
+    if ($result === true) {
+        return true;
+    }
+
+    $rawUrl = 'https://raw.githubusercontent.com/sagioa3024/passport-contract-ocr/main/public_html/contract_template.docx';
+    $rawBytes = @file_get_contents($rawUrl);
+    if ($rawBytes !== false && strlen($rawBytes) > 1000) {
+        $rawFallbackPath = sys_get_temp_dir() . '/contract_template_raw_' . md5($rawBytes) . '.docx';
+        if (file_put_contents($rawFallbackPath, $rawBytes) !== false) {
+            $rawResult = $zip->open($rawFallbackPath);
+            if ($rawResult === true) {
+                return true;
+            }
+        }
+    }
+
+    $base64Path = __DIR__ . '/contract_template.base64.txt';
+    if (!file_exists($base64Path)) {
+        return $result;
+    }
+
+    $base64 = preg_replace('/\s+/', '', (string)file_get_contents($base64Path));
+    $bytes = base64_decode($base64, true);
+    if ($bytes === false) {
+        return $result;
+    }
+
+    $fallbackPath = sys_get_temp_dir() . '/contract_template_' . md5($base64) . '.docx';
+    if (file_put_contents($fallbackPath, $bytes) === false) {
+        return $result;
+    }
+
+    return $zip->open($fallbackPath);
+}
+
 if (empty($_POST['consent'])) {
     setStatus(400);
     echo 'Нужно подтвердить согласие и проверку данных.';
@@ -222,9 +260,10 @@ if (!class_exists('ZipArchive')) {
 }
 
 $source = new ZipArchive();
-if ($source->open($templatePath) !== true) {
+$templateOpenResult = openTemplateArchive($source, $templatePath);
+if ($templateOpenResult !== true) {
     setStatus(500);
-    echo 'Не удалось открыть шаблон договора.';
+    echo 'Не удалось открыть шаблон договора. Код: ' . $templateOpenResult;
     exit;
 }
 
