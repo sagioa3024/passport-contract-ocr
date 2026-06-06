@@ -107,14 +107,93 @@ function buildFileContent($file, $mime)
     );
 }
 
+function responseOutputText($response)
+{
+    $text = isset($response['output_text']) ? $response['output_text'] : '';
+    if ($text === '' && isset($response['output'])) {
+        foreach ($response['output'] as $item) {
+            $contents = isset($item['content']) ? $item['content'] : array();
+            foreach ($contents as $content) {
+                if ((isset($content['type']) ? $content['type'] : '') === 'output_text') {
+                    $text .= isset($content['text']) ? $content['text'] : '';
+                }
+            }
+        }
+    }
+    return $text;
+}
+
+function requestPassportData($apiKey, $model, $contentParts, $schema, &$error)
+{
+    $payload = array(
+        'model' => $model,
+        'input' => array(array(
+            'role' => 'user',
+            'content' => $contentParts,
+        )),
+        'text' => array(
+            'format' => array(
+                'type' => 'json_schema',
+                'name' => 'passport_data',
+                'schema' => $schema,
+                'strict' => true,
+            ),
+        ),
+    );
+
+    $ch = curl_init('https://api.openai.com/v1/responses');
+    curl_setopt_array($ch, array(
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => array(
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $apiKey,
+        ),
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 90,
+    ));
+
+    $raw = curl_exec($ch);
+    $curlError = curl_error($ch);
+    $statusCode = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    if ($raw === false || $curlError) {
+        $error = 'Ошибка соединения с OpenAI API.';
+        return null;
+    }
+
+    $response = json_decode($raw, true);
+    if ($statusCode >= 400) {
+        $error = isset($response['error']['message']) ? $response['error']['message'] : 'OpenAI API вернул ошибку.';
+        return null;
+    }
+
+    $data = json_decode(responseOutputText($response), true);
+    if (!is_array($data)) {
+        $error = 'ИИ вернул ответ в неожиданном формате.';
+        return null;
+    }
+
+    return $data;
+}
+
 $configPath = __DIR__ . '/../config.php';
 $examplePath = __DIR__ . '/../config.example.php';
 $config = file_exists($configPath) ? require $configPath : require $examplePath;
 
 $apiKey = trim((string)(isset($config['openai_api_key']) ? $config['openai_api_key'] : ''));
-$model = trim((string)(isset($config['openai_model']) ? $config['openai_model'] : 'gpt-4.1'));
-if ($model === '' || $model === 'gpt-4.1-mini') {
-    $model = 'gpt-4.1';
+$model = trim((string)(isset($config['openai_model']) ? $config['openai_model'] : 'gpt-5'));
+$envApiKey = getenv('OPENAI_API_KEY');
+$envModel = getenv('OPENAI_MODEL');
+if (is_string($envApiKey) && trim($envApiKey) !== '') {
+    $apiKey = trim($envApiKey);
+}
+if (is_string($envModel) && trim($envModel) !== '') {
+    $model = trim($envModel);
+}
+if ($model === '' || $model === 'gpt-4.1-mini' || $model === 'gpt-4.1') {
+    $model = 'gpt-5';
 }
 $maxUploadMb = (int)(isset($config['max_upload_mb']) ? $config['max_upload_mb'] : 10);
 
@@ -139,7 +218,7 @@ $allowed = array('image/jpeg', 'image/png', 'image/webp', 'application/pdf');
 $contentParts = array();
 $contentParts[] = array(
     'type' => 'input_text',
-    'text' => 'Extract ALL visible fields from a Russian internal passport of the Russian Federation. The user may upload one image or several images. One image can be a photocopy sheet containing multiple passport pages at once: identity page, issuing authority page, registration page, or passport spreads placed side by side, upside down, rotated 90 degrees, or in different positions. Treat all visible passport fragments on all uploaded images as one document. Inspect the entire image area, not only the biggest page. Mentally rotate each passport fragment by 0, 90, 180, and 270 degrees. Return empty string only if a field is truly not visible or unreadable. Do not invent values. full_name: surname, given name, patronymic from identity page near photo. birth_date: date of birth, return YYYY-MM-DD. birth_place: place of birth. passport_series: exactly 4 digits; often printed vertically/rotated in red on margins. passport_number: exactly 6 digits; if 10 consecutive digits are visible, first 4 are series and last 6 are number. issued_by: full issuing authority text near issue date. issue_date: return YYYY-MM-DD. department_code: subdivision code in format 000-000. registration_address: from registration stamp, include city/locality, street, house, building/corpus/structure if visible, and apartment if visible. Stamps vary. For house number, prioritize labels meaning house such as dom/d. or the house field near the street. For apartment number, prioritize labels meaning apartment such as kv./kvartira or the apartment field; apartment is mandatory when visible and often sits on the same line/level as the house number or at the far right. Ignore registration/propiska date numbers completely; dates can look like 26 04 2002 or 26.04.2002 and must never become house or apartment. Do not include registration date, expiration date, cancellation date, or words about registration timing in the address.'
+    'text' => 'Extract ALL visible fields from a Russian internal passport of the Russian Federation. The user may upload one image or several images. A single image can contain two or more passport photos/pages on the same sheet: identity page, issuing authority page, registration page, passport cover, or copy fragments. Pages can be side by side, above/below each other, upside down, rotated 90 degrees, very small, or partially cropped. Treat every visible passport fragment on every uploaded image as one document. Do a full-layout pass: inspect top/bottom/left/right and center, then mentally rotate the whole image and each fragment by 0, 90, 180, and 270 degrees. Do not ignore a registration stamp just because it is upside down, vertical, on the right side, or smaller than the main identity page. If several photos/pages are visible, combine data from all fragments belonging to the same passport. Return empty string only if a field is truly not visible or unreadable. Do not invent values. full_name: surname, given name, patronymic from identity page near photo. birth_date: date of birth, return YYYY-MM-DD. birth_place: place of birth. passport_series: exactly 4 digits; often printed vertically/rotated in red on margins. passport_number: exactly 6 digits; if 10 consecutive digits are visible, first 4 are series and last 6 are number. issued_by: full issuing authority text near issue date. issue_date: return YYYY-MM-DD. department_code: subdivision code in format 000-000. registration_address: from registration stamp, include only city/locality, street, house, building/corpus/structure if visible, and apartment if visible. Registration stamps vary and can be handwritten or printed. For house number, prioritize labels meaning house such as дом, д., dom, d. or the house field near the street. For apartment number, prioritize labels meaning apartment such as кв., квартира, kv., kvartira or the apartment field; apartment is mandatory when visible and often sits on the same line/level as the house number or at the far right of the stamp. Ignore registration/propiska date numbers completely; dates can look like 26 04 2002 or 26.04.2002 and must never become house or apartment. Do not include registration date, expiration date, cancellation date, or words about registration timing in the address.'
 );
 
 foreach ($uploadedFiles as $file) {
@@ -203,69 +282,11 @@ $schema = array(
     ),
 );
 
-$payload = array(
-    'model' => $model,
-    'input' => array(array(
-        'role' => 'user',
-        'content' => $contentParts,
-    )),
-    'text' => array(
-        'format' => array(
-            'type' => 'json_schema',
-            'name' => 'passport_data',
-            'schema' => $schema,
-            'strict' => true,
-        ),
-    ),
-);
-
-$ch = curl_init('https://api.openai.com/v1/responses');
-curl_setopt_array($ch, array(
-    CURLOPT_POST => true,
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER => array(
-        'Content-Type: application/json',
-        'Authorization: Bearer ' . $apiKey,
-    ),
-    CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
-    CURLOPT_TIMEOUT => 60,
-));
-
-$raw = curl_exec($ch);
-$curlError = curl_error($ch);
-$statusCode = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-curl_close($ch);
-
-if ($raw === false || $curlError) {
-    setStatus(502);
-    echo json_encode(array('ok' => false, 'error' => 'Ошибка соединения с OpenAI API.'), JSON_UNESCAPED_UNICODE);
-    exit;
-}
-
-$response = json_decode($raw, true);
-if ($statusCode >= 400) {
-    setStatus(502);
-    $message = isset($response['error']['message']) ? $response['error']['message'] : 'OpenAI API вернул ошибку.';
-    echo json_encode(array('ok' => false, 'error' => $message), JSON_UNESCAPED_UNICODE);
-    exit;
-}
-
-$text = isset($response['output_text']) ? $response['output_text'] : '';
-if ($text === '' && isset($response['output'])) {
-    foreach ($response['output'] as $item) {
-        $contents = isset($item['content']) ? $item['content'] : array();
-        foreach ($contents as $content) {
-            if ((isset($content['type']) ? $content['type'] : '') === 'output_text') {
-                $text .= isset($content['text']) ? $content['text'] : '';
-            }
-        }
-    }
-}
-
-$data = json_decode($text, true);
+$error = '';
+$data = requestPassportData($apiKey, $model, $contentParts, $schema, $error);
 if (!is_array($data)) {
     setStatus(502);
-    echo json_encode(array('ok' => false, 'error' => 'ИИ вернул ответ в неожиданном формате.'), JSON_UNESCAPED_UNICODE);
+    echo json_encode(array('ok' => false, 'error' => $error !== '' ? $error : 'ИИ вернул ответ в неожиданном формате.'), JSON_UNESCAPED_UNICODE);
     exit;
 }
 
