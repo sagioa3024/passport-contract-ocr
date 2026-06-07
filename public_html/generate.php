@@ -131,10 +131,21 @@ function hasAllText($text, $needles)
 
 function fillDocumentXml($xml, $data)
 {
+    if (!class_exists('DOMDocument')) {
+        return $xml;
+    }
+
+    $previous = libxml_use_internal_errors(true);
     $dom = new DOMDocument();
     $dom->preserveWhiteSpace = true;
     $dom->formatOutput = false;
-    $dom->loadXML($xml);
+    $loaded = @$dom->loadXML($xml);
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+
+    if (!$loaded) {
+        return $xml;
+    }
 
     $paragraphs = $dom->getElementsByTagNameNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'p');
     foreach ($paragraphs as $paragraph) {
@@ -150,8 +161,8 @@ function fillDocumentXml($xml, $data)
             continue;
         }
 
-        if (strpos($text, 'Заказчик\\Слушатель') !== false || strpos($text, 'Заказчик/Слушатель') !== false) {
-            replaceParagraphText($paragraph, 'Заказчик\\Слушатель' . "\t    " . '____________ /' . $data['signature'] . '/');
+        if (strpos($text, 'Заказчик\Слушатель') !== false || strpos($text, 'Заказчик/Слушатель') !== false) {
+            replaceParagraphText($paragraph, 'Заказчик\Слушатель' . "\t    " . '____________ /' . $data['signature'] . '/');
             continue;
         }
     }
@@ -159,58 +170,215 @@ function fillDocumentXml($xml, $data)
     return $dom->saveXML();
 }
 
-function openTemplateArchive($zip, $templatePath)
+function le16($bytes, $offset)
 {
-    $result = @$zip->open($templatePath);
-    if ($result === true) {
-        return true;
-    }
+    $value = unpack('v', substr($bytes, $offset, 2));
+    return $value ? $value[1] : 0;
+}
 
+function le32($bytes, $offset)
+{
+    $value = unpack('V', substr($bytes, $offset, 4));
+    return $value ? $value[1] : 0;
+}
+
+function loadTemplateBytes($templatePath, &$error)
+{
     if (is_readable($templatePath)) {
-        $localBytes = @file_get_contents($templatePath);
-        if ($localBytes !== false && strlen($localBytes) > 1000) {
-            $localFallbackPath = sys_get_temp_dir() . '/contract_template_local_' . md5($localBytes) . '.docx';
-            if (file_put_contents($localFallbackPath, $localBytes) !== false) {
-                $localResult = @$zip->open($localFallbackPath);
-                if ($localResult === true) {
-                    return true;
-                }
-                $result = $localResult;
-            }
-        }
-    }
-
-    $rawUrl = 'https://raw.githubusercontent.com/sagioa3024/passport-contract-ocr/main/public_html/contract_template.docx';
-    $rawBytes = @file_get_contents($rawUrl);
-    if ($rawBytes !== false && strlen($rawBytes) > 1000) {
-        $rawFallbackPath = sys_get_temp_dir() . '/contract_template_raw_' . md5($rawBytes) . '.docx';
-        if (file_put_contents($rawFallbackPath, $rawBytes) !== false) {
-            $rawResult = @$zip->open($rawFallbackPath);
-            if ($rawResult === true) {
-                return true;
-            }
-            $result = $rawResult;
+        $bytes = @file_get_contents($templatePath);
+        if ($bytes !== false && strlen($bytes) > 1000 && substr($bytes, 0, 2) === 'PK') {
+            return $bytes;
         }
     }
 
     $base64Path = __DIR__ . '/contract_template.base64.txt';
-    if (!file_exists($base64Path)) {
-        return $result;
+    if (is_readable($base64Path)) {
+        $base64 = preg_replace('/\s+/', '', (string)@file_get_contents($base64Path));
+        $bytes = base64_decode($base64, true);
+        if ($bytes !== false && strlen($bytes) > 1000 && substr($bytes, 0, 2) === 'PK') {
+            return $bytes;
+        }
     }
 
-    $base64 = preg_replace('/\s+/', '', (string)file_get_contents($base64Path));
-    $bytes = base64_decode($base64, true);
-    if ($bytes === false) {
-        return $result;
+    $error = 'Не удалось прочитать полный шаблон договора contract_template.docx.';
+    return false;
+}
+
+function readDocxEntries($bytes, &$error)
+{
+    $eocd = strrpos($bytes, "\x50\x4b\x05\x06");
+    if ($eocd === false) {
+        $error = 'Шаблон договора не похож на DOCX/ZIP.';
+        return false;
     }
 
-    $fallbackPath = sys_get_temp_dir() . '/contract_template_' . md5($base64) . '.docx';
-    if (file_put_contents($fallbackPath, $bytes) === false) {
-        return $result;
+    $totalEntries = le16($bytes, $eocd + 10);
+    $centralOffset = le32($bytes, $eocd + 16);
+    $entries = array();
+    $pos = $centralOffset;
+
+    for ($i = 0; $i < $totalEntries; $i++) {
+        if (substr($bytes, $pos, 4) !== "\x50\x4b\x01\x02") {
+            $error = 'Не удалось прочитать структуру шаблона договора.';
+            return false;
+        }
+
+        $flags = le16($bytes, $pos + 8);
+        $method = le16($bytes, $pos + 10);
+        $compressedSize = le32($bytes, $pos + 20);
+        $nameLength = le16($bytes, $pos + 28);
+        $extraLength = le16($bytes, $pos + 30);
+        $commentLength = le16($bytes, $pos + 32);
+        $localOffset = le32($bytes, $pos + 42);
+        $name = substr($bytes, $pos + 46, $nameLength);
+
+        if (substr($bytes, $localOffset, 4) !== "\x50\x4b\x03\x04") {
+            $error = 'Не удалось прочитать файл внутри шаблона договора.';
+            return false;
+        }
+
+        $localNameLength = le16($bytes, $localOffset + 26);
+        $localExtraLength = le16($bytes, $localOffset + 28);
+        $dataStart = $localOffset + 30 + $localNameLength + $localExtraLength;
+        $compressed = substr($bytes, $dataStart, $compressedSize);
+
+        if ($method === 0) {
+            $content = $compressed;
+        } elseif ($method === 8) {
+            $content = @gzinflate($compressed);
+            if ($content === false) {
+                $error = 'Не удалось распаковать часть шаблона договора.';
+                return false;
+            }
+        } else {
+            $error = 'Шаблон договора использует неподдерживаемое сжатие ZIP.';
+            return false;
+        }
+
+        $entries[] = array(
+            'name' => $name,
+            'content' => $content,
+            'flags' => $flags,
+        );
+
+        $pos += 46 + $nameLength + $extraLength + $commentLength;
     }
 
-    $base64Result = @$zip->open($fallbackPath);
-    return $base64Result === true ? true : $base64Result;
+    return $entries;
+}
+
+function dosTimeDate()
+{
+    $time = time();
+    $hour = (int)date('G', $time);
+    $minute = (int)date('i', $time);
+    $second = (int)date('s', $time);
+    $year = max(1980, (int)date('Y', $time));
+    $month = (int)date('n', $time);
+    $day = (int)date('j', $time);
+
+    $dosTime = ($hour << 11) | ($minute << 5) | (int)floor($second / 2);
+    $dosDate = (($year - 1980) << 9) | ($month << 5) | $day;
+    return array($dosTime, $dosDate);
+}
+
+function buildDocxBytes($entries, &$error)
+{
+    list($dosTime, $dosDate) = dosTimeDate();
+    $local = '';
+    $central = '';
+    $offset = 0;
+
+    foreach ($entries as $entry) {
+        $name = $entry['name'];
+        $content = $entry['content'];
+        $method = ($content === '' || substr($name, -1) === '/') ? 0 : 8;
+        $compressed = $method === 8 ? gzdeflate($content, 6) : $content;
+        if ($compressed === false) {
+            $error = 'Не удалось сжать готовый договор.';
+            return false;
+        }
+
+        $crc = crc32($content);
+        $compressedSize = strlen($compressed);
+        $uncompressedSize = strlen($content);
+        $nameLength = strlen($name);
+
+        $localHeader = pack('V', 0x04034b50)
+            . pack('v', 20)
+            . pack('v', 0)
+            . pack('v', $method)
+            . pack('v', $dosTime)
+            . pack('v', $dosDate)
+            . pack('V', $crc)
+            . pack('V', $compressedSize)
+            . pack('V', $uncompressedSize)
+            . pack('v', $nameLength)
+            . pack('v', 0)
+            . $name;
+
+        $centralHeader = pack('V', 0x02014b50)
+            . pack('v', 20)
+            . pack('v', 20)
+            . pack('v', 0)
+            . pack('v', $method)
+            . pack('v', $dosTime)
+            . pack('v', $dosDate)
+            . pack('V', $crc)
+            . pack('V', $compressedSize)
+            . pack('V', $uncompressedSize)
+            . pack('v', $nameLength)
+            . pack('v', 0)
+            . pack('v', 0)
+            . pack('v', 0)
+            . pack('v', 0)
+            . pack('V', 0)
+            . pack('V', $offset)
+            . $name;
+
+        $local .= $localHeader . $compressed;
+        $central .= $centralHeader;
+        $offset += strlen($localHeader) + $compressedSize;
+    }
+
+    $centralOffset = strlen($local);
+    $centralSize = strlen($central);
+    $count = count($entries);
+
+    $eocd = pack('V', 0x06054b50)
+        . pack('v', 0)
+        . pack('v', 0)
+        . pack('v', $count)
+        . pack('v', $count)
+        . pack('V', $centralSize)
+        . pack('V', $centralOffset)
+        . pack('v', 0);
+
+    return $local . $central . $eocd;
+}
+
+function createContractDocx($templateBytes, $data, &$error)
+{
+    $entries = readDocxEntries($templateBytes, $error);
+    if ($entries === false) {
+        return false;
+    }
+
+    $foundDocument = false;
+    foreach ($entries as $index => $entry) {
+        if ($entry['name'] === 'word/document.xml') {
+            $entries[$index]['content'] = fillDocumentXml($entry['content'], $data);
+            $foundDocument = true;
+            break;
+        }
+    }
+
+    if (!$foundDocument) {
+        $error = 'В шаблоне договора не найден word/document.xml.';
+        return false;
+    }
+
+    return buildDocxBytes($entries, $error);
 }
 
 if (empty($_POST['consent'])) {
@@ -247,7 +415,6 @@ if ($departmentCode !== '') {
 $customerParagraph = 'Индивидуальный предприниматель Финтисов Михаил Сергеевич (Учебный центр РОСТ) ОГРНИП 318237500147635, ИНН 231501144923 Регистрационный номер лицензии на образовательную деятельность № Л035-01218-23/00243153 от 03.02.2021, именуемый в дальнейшем «Исполнитель», с одной стороны, и гр. РФ ' . $fullName . ' ' . ($birthDate !== '' ? $birthDate : '_______') . ' года рождения, место рождения ' . ($birthPlace !== '' ? $birthPlace : '_______________') . ', ' . $passportDetails . ', ' . $issuedDetails . ', проживающий(ая) по адресу ' . ($address !== '' ? $address : '______________________________') . ', телефон: ' . ($phone !== '' ? $phone : '______________') . ', именуемый в дальнейшем «Заказчик», с другой стороны заключили между собой настоящий договор о нижеследующем.';
 
 $templatePath = __DIR__ . '/contract_template.docx';
-
 $generatedDir = __DIR__ . '/generated';
 if (!is_dir($generatedDir) && !mkdir($generatedDir, 0755, true)) {
     setStatus(500);
@@ -264,14 +431,6 @@ $safeName = safeFilenamePart($fullName);
 $filename = 'contract_' . $safeName . '_' . date('Ymd_His') . '.docx';
 $path = $generatedDir . '/' . $filename;
 
-if (!class_exists('ZipArchive')) {
-    setStatus(500);
-    echo 'На сервере не подключено PHP-расширение ZipArchive для создания DOCX.';
-    exit;
-}
-
-$source = new ZipArchive();
-$templateOpenResult = openTemplateArchive($source, $templatePath);
 $data = array(
     'city' => $city,
     'contract_date' => $contractDate,
@@ -279,30 +438,25 @@ $data = array(
     'signature' => signatureName($fullName),
 );
 
-if ($templateOpenResult !== true) {
+$error = '';
+$templateBytes = loadTemplateBytes($templatePath, $error);
+if ($templateBytes === false) {
     setStatus(500);
-    echo 'Не удалось открыть полный шаблон договора contract_template.docx. Код: ' . $templateOpenResult;
+    echo $error;
     exit;
-} else {
-    $target = new ZipArchive();
-    if ($target->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-        $source->close();
-        setStatus(500);
-        echo 'Не удалось создать готовый договор.';
-        exit;
-    }
+}
 
-    for ($i = 0; $i < $source->numFiles; $i++) {
-        $name = $source->getNameIndex($i);
-        $content = $source->getFromIndex($i);
-        if ($name === 'word/document.xml') {
-            $content = fillDocumentXml($content, $data);
-        }
-        $target->addFromString($name, $content);
-    }
+$docxBytes = createContractDocx($templateBytes, $data, $error);
+if ($docxBytes === false) {
+    setStatus(500);
+    echo $error !== '' ? $error : 'Не удалось сформировать договор.';
+    exit;
+}
 
-    $source->close();
-    $target->close();
+if (file_put_contents($path, $docxBytes) === false) {
+    setStatus(500);
+    echo 'Не удалось записать готовый договор.';
+    exit;
 }
 
 header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
