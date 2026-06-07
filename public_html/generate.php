@@ -6,10 +6,7 @@ error_reporting(E_ALL);
 
 function setStatus($code)
 {
-    $texts = array(
-        400 => 'Bad Request',
-        500 => 'Internal Server Error',
-    );
+    $texts = array(400 => 'Bad Request', 500 => 'Internal Server Error');
     $text = isset($texts[$code]) ? $texts[$code] : 'Error';
     header('HTTP/1.1 ' . $code . ' ' . $text);
 }
@@ -27,13 +24,31 @@ function value($key)
     return trim((string)(isset($_POST[$key]) ? $_POST[$key] : ''));
 }
 
+function parsedDate($date)
+{
+    if ($date === '') {
+        return false;
+    }
+
+    if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $date, $match)) {
+        return mktime(0, 0, 0, (int)$match[2], (int)$match[3], (int)$match[1]);
+    }
+
+    if (preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $date, $match)) {
+        return mktime(0, 0, 0, (int)$match[2], (int)$match[1], (int)$match[3]);
+    }
+
+    $time = strtotime($date);
+    return $time ? $time : false;
+}
+
 function humanDate($date)
 {
     if ($date === '') {
         return '';
     }
 
-    $time = strtotime($date);
+    $time = parsedDate($date);
     return $time ? date('d.m.Y', $time) : $date;
 }
 
@@ -48,7 +63,7 @@ function quotedDate($date)
         return '«____» __________ ____';
     }
 
-    $time = strtotime($date);
+    $time = parsedDate($date);
     if (!$time) {
         return $date;
     }
@@ -105,353 +120,53 @@ function signatureName($fullName)
     return trim($initials . ' ' . $lastName);
 }
 
-function paragraphText($paragraph)
+function runPythonContract($scriptPath, $payload, &$error)
 {
-    $text = '';
-    $nodes = $paragraph->getElementsByTagNameNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 't');
-    foreach ($nodes as $node) {
-        $text .= $node->nodeValue;
-    }
-    return $text;
-}
-
-function replaceParagraphText($paragraph, $text)
-{
-    $nodes = $paragraph->getElementsByTagNameNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 't');
-    if ($nodes->length === 0) {
-        return;
-    }
-
-    $nodes->item(0)->nodeValue = $text;
-    for ($i = 1; $i < $nodes->length; $i++) {
-        $nodes->item($i)->nodeValue = '';
-    }
-}
-
-function hasAllText($text, $needles)
-{
-    foreach ($needles as $needle) {
-        if (strpos($text, $needle) === false) {
-            return false;
-        }
-    }
-    return true;
-}
-
-function fillDocumentXml($xml, $data, &$error)
-{
-    if (!class_exists('DOMDocument')) {
-        $error = 'На сервере нет PHP DOM для заполнения DOCX.';
-        return false;
-    }
-
-    $previous = libxml_use_internal_errors(true);
-    $dom = new DOMDocument();
-    $dom->preserveWhiteSpace = true;
-    $dom->formatOutput = false;
-    $loaded = @$dom->loadXML($xml);
-    libxml_clear_errors();
-    libxml_use_internal_errors($previous);
-
-    if (!$loaded) {
-        $error = 'Не удалось прочитать XML внутри шаблона договора.';
-        return false;
-    }
-
-    $paragraphs = $dom->getElementsByTagNameNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'p');
-    foreach ($paragraphs as $paragraph) {
-        $text = paragraphText($paragraph);
-
-        if (hasAllText($text, array('г. Новороссийск', '10 января 2026')) || strpos($text, '10 января 2026г') !== false) {
-            replaceParagraphText($paragraph, 'г. ' . $data['city'] . "\t\t\t\t\t" . $data['contract_date'] . ' г.');
-            continue;
-        }
-
-        if (hasAllText($text, array('гр. РФ', 'Петров Петр Петрович')) || hasAllText($text, array('паспорт серия', 'проживающий'))) {
-            replaceParagraphText($paragraph, $data['customer_paragraph']);
-            continue;
-        }
-
-        if (strpos($text, 'Заказчик') !== false && strpos($text, 'Слушатель') !== false) {
-            replaceParagraphText($paragraph, 'Заказчик\Слушатель' . "\t    " . '____________ /' . $data['signature'] . '/');
-            continue;
-        }
-    }
-
-    return $dom->saveXML();
-}
-
-function runCommand($command, $cwd, &$stdout, &$stderr)
-{
-    $stdout = '';
-    $stderr = '';
     if (!function_exists('proc_open')) {
-        return 127;
+        $error = 'На сервере отключен proc_open для запуска генератора договора.';
+        return false;
     }
 
-    $descriptors = array(
-        0 => array('pipe', 'r'),
-        1 => array('pipe', 'w'),
-        2 => array('pipe', 'w'),
-    );
-
-    $process = @proc_open($command, $descriptors, $pipes, $cwd ? $cwd : null);
-    if (!is_resource($process)) {
-        return 127;
+    $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        $error = 'Не удалось подготовить данные договора для генератора.';
+        return false;
     }
 
-    fclose($pipes[0]);
-    $stdout = stream_get_contents($pipes[1]);
-    fclose($pipes[1]);
-    $stderr = stream_get_contents($pipes[2]);
-    fclose($pipes[2]);
+    foreach (array('python3', 'python') as $python) {
+        $cmd = $python . ' ' . escapeshellarg($scriptPath);
+        $descriptors = array(
+            0 => array('pipe', 'r'),
+            1 => array('pipe', 'w'),
+            2 => array('pipe', 'w'),
+        );
 
-    return proc_close($process);
-}
-
-function commandExists($command)
-{
-    $out = '';
-    $err = '';
-    return runCommand('command -v ' . escapeshellarg($command), null, $out, $err) === 0;
-}
-
-function deleteTree($path)
-{
-    if (!is_dir($path)) {
-        return;
-    }
-    $items = scandir($path);
-    if (!$items) {
-        return;
-    }
-    foreach ($items as $item) {
-        if ($item === '.' || $item === '..') {
+        $process = @proc_open($cmd, $descriptors, $pipes, __DIR__);
+        if (!is_resource($process)) {
             continue;
         }
-        $child = $path . DIRECTORY_SEPARATOR . $item;
-        if (is_dir($child)) {
-            deleteTree($child);
-        } else {
-            @unlink($child);
-        }
-    }
-    @rmdir($path);
-}
 
-function validDocxBytes($bytes)
-{
-    return is_string($bytes) && strlen($bytes) > 1000 && substr($bytes, 0, 2) === 'PK';
-}
+        fwrite($pipes[0], $json);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[2]);
+        $code = proc_close($process);
 
-function addTemplateCandidate(&$candidates, $label, $bytes)
-{
-    if (!validDocxBytes($bytes)) {
-        return;
-    }
-    $hash = md5($bytes);
-    foreach ($candidates as $candidate) {
-        if ($candidate['hash'] === $hash) {
-            return;
-        }
-    }
-    $candidates[] = array('label' => $label, 'bytes' => $bytes, 'hash' => $hash);
-}
-
-function fetchUrlBytes($url)
-{
-    if (function_exists('curl_init')) {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, array(
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_TIMEOUT => 25,
-        ));
-        $bytes = curl_exec($ch);
-        $code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        curl_close($ch);
-        if (is_string($bytes) && $code >= 200 && $code < 400) {
-            return $bytes;
-        }
-    }
-
-    $bytes = @file_get_contents($url);
-    return is_string($bytes) ? $bytes : false;
-}
-
-function loadTemplateCandidates($templatePath)
-{
-    $candidates = array();
-
-    $base64Path = __DIR__ . '/contract_template.base64.txt';
-    if (is_readable($base64Path)) {
-        $base64 = preg_replace('/\s+/', '', (string)@file_get_contents($base64Path));
-        addTemplateCandidate($candidates, 'base64', base64_decode($base64, true));
-    }
-
-    if (is_readable($templatePath)) {
-        addTemplateCandidate($candidates, 'local', @file_get_contents($templatePath));
-    }
-
-    $rawUrl = 'https://raw.githubusercontent.com/sagioa3024/passport-contract-ocr/main/public_html/contract_template.docx';
-    addTemplateCandidate($candidates, 'github-raw', fetchUrlBytes($rawUrl));
-
-    return $candidates;
-}
-
-function createDocxWithCliZip($templateBytes, $targetPath, $data, &$error)
-{
-    if (!commandExists('unzip') || !commandExists('zip')) {
-        $error = 'На сервере нет команд zip/unzip.';
-        return false;
-    }
-
-    $workDir = sys_get_temp_dir() . '/contract_docx_' . str_replace('.', '', uniqid('', true));
-    if (!mkdir($workDir, 0700, true)) {
-        $error = 'Не удалось создать временную папку для договора.';
-        return false;
-    }
-
-    $templateFile = $workDir . '/template.docx';
-    if (file_put_contents($templateFile, $templateBytes) === false) {
-        deleteTree($workDir);
-        $error = 'Не удалось записать временный шаблон договора.';
-        return false;
-    }
-
-    $stdout = '';
-    $stderr = '';
-    $code = runCommand('unzip -p ' . escapeshellarg($templateFile) . ' word/document.xml', null, $stdout, $stderr);
-    if ($code !== 0 || $stdout === '') {
-        deleteTree($workDir);
-        $error = 'unzip не смог прочитать word/document.xml: ' . trim($stderr);
-        return false;
-    }
-
-    $xml = fillDocumentXml($stdout, $data, $error);
-    if ($xml === false) {
-        deleteTree($workDir);
-        return false;
-    }
-
-    if (!copy($templateFile, $targetPath)) {
-        deleteTree($workDir);
-        $error = 'Не удалось создать копию шаблона договора.';
-        return false;
-    }
-
-    $wordDir = $workDir . '/word';
-    if (!mkdir($wordDir, 0700, true)) {
-        deleteTree($workDir);
-        $error = 'Не удалось создать временную папку word.';
-        return false;
-    }
-    if (file_put_contents($wordDir . '/document.xml', $xml) === false) {
-        deleteTree($workDir);
-        $error = 'Не удалось записать обновленный document.xml.';
-        return false;
-    }
-
-    $code = runCommand('zip -q -u ' . escapeshellarg($targetPath) . ' word/document.xml', $workDir, $stdout, $stderr);
-    if ($code !== 0) {
-        deleteTree($workDir);
-        $error = 'zip не смог обновить DOCX: ' . trim($stderr);
-        return false;
-    }
-
-    $code = runCommand('unzip -t ' . escapeshellarg($targetPath), null, $stdout, $stderr);
-    if ($code !== 0) {
-        deleteTree($workDir);
-        $error = 'Готовый DOCX не прошел проверку unzip: ' . trim($stdout . ' ' . $stderr);
-        return false;
-    }
-
-    deleteTree($workDir);
-    return true;
-}
-
-function createDocxWithZipArchive($templateBytes, $targetPath, $data, &$error)
-{
-    if (!class_exists('ZipArchive')) {
-        $error = 'На сервере нет ZipArchive.';
-        return false;
-    }
-
-    $templateFile = sys_get_temp_dir() . '/contract_template_' . md5($templateBytes) . '.docx';
-    if (file_put_contents($templateFile, $templateBytes) === false) {
-        $error = 'Не удалось записать временный шаблон DOCX.';
-        return false;
-    }
-
-    $source = new ZipArchive();
-    $openCode = @$source->open($templateFile);
-    if ($openCode !== true) {
-        @unlink($templateFile);
-        $error = 'ZipArchive не смог открыть шаблон. Код: ' . $openCode;
-        return false;
-    }
-
-    $target = new ZipArchive();
-    if ($target->open($targetPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-        $source->close();
-        @unlink($templateFile);
-        $error = 'ZipArchive не смог создать готовый договор.';
-        return false;
-    }
-
-    for ($i = 0; $i < $source->numFiles; $i++) {
-        $name = $source->getNameIndex($i);
-        $content = $source->getFromIndex($i);
-        if ($content === false) {
-            $target->close();
-            $source->close();
-            @unlink($templateFile);
-            $error = 'Не удалось прочитать файл внутри шаблона: ' . $name;
-            return false;
-        }
-        if ($name === 'word/document.xml') {
-            $content = fillDocumentXml($content, $data, $error);
-            if ($content === false) {
-                $target->close();
-                $source->close();
-                @unlink($templateFile);
-                return false;
-            }
-        }
-        $target->addFromString($name, $content);
-    }
-
-    $source->close();
-    $closed = $target->close();
-    @unlink($templateFile);
-
-    if (!$closed) {
-        $error = 'ZipArchive не смог сохранить готовый договор.';
-        return false;
-    }
-
-    return true;
-}
-
-function createContractDocx($templateCandidates, $targetPath, $data, &$error)
-{
-    $errors = array();
-    foreach ($templateCandidates as $candidate) {
-        $candidateError = '';
-        if (createDocxWithCliZip($candidate['bytes'], $targetPath, $data, $candidateError)) {
+        if ($code === 0) {
             return true;
         }
-        $errors[] = $candidate['label'] . '/cli: ' . $candidateError;
 
-        $candidateError = '';
-        if (createDocxWithZipArchive($candidate['bytes'], $targetPath, $data, $candidateError)) {
-            return true;
+        $error = trim($stderr !== '' ? $stderr : $stdout);
+        if ($error === '') {
+            $error = 'Python-генератор договора завершился с кодом ' . $code . '.';
         }
-        $errors[] = $candidate['label'] . '/ziparchive: ' . $candidateError;
     }
 
-    $error = 'Не удалось сформировать договор. ' . implode(' | ', array_slice($errors, 0, 6));
+    if ($error === '') {
+        $error = 'Python не найден на сервере.';
+    }
     return false;
 }
 
@@ -485,7 +200,15 @@ if ($departmentCode !== '') {
 $customerParagraph = 'Индивидуальный предприниматель Финтисов Михаил Сергеевич (Учебный центр РОСТ) ОГРНИП 318237500147635, ИНН 231501144923 Регистрационный номер лицензии на образовательную деятельность № Л035-01218-23/00243153 от 03.02.2021, именуемый в дальнейшем «Исполнитель», с одной стороны, и гр. РФ ' . $fullName . ' ' . ($birthDate !== '' ? $birthDate : '_______') . ' года рождения, место рождения ' . ($birthPlace !== '' ? $birthPlace : '_______________') . ', ' . $passportDetails . ', ' . $issuedDetails . ', проживающий(ая) по адресу ' . ($address !== '' ? $address : '______________________________') . ', телефон: ' . ($phone !== '' ? $phone : '______________') . ', именуемый в дальнейшем «Заказчик», с другой стороны заключили между собой настоящий договор о нижеследующем.';
 
 $templatePath = __DIR__ . '/contract_template.docx';
+$scriptPath = __DIR__ . '/contract_fill.py';
 $generatedDir = __DIR__ . '/generated';
+
+if (!is_readable($scriptPath)) {
+    fail('Не найден генератор договора contract_fill.py.');
+}
+if (!is_readable($templatePath) && !is_readable(__DIR__ . '/contract_template.base64.txt')) {
+    fail('Не найден шаблон договора contract_template.docx.');
+}
 if (!is_dir($generatedDir) && !mkdir($generatedDir, 0755, true)) {
     fail('Не удалось создать папку для готовых договоров.');
 }
@@ -504,14 +227,15 @@ $data = array(
     'signature' => signatureName($fullName),
 );
 
-$candidates = loadTemplateCandidates($templatePath);
-if (count($candidates) === 0) {
-    fail('Не найден полный шаблон договора contract_template.docx.');
-}
+$payload = array(
+    'template_path' => $templatePath,
+    'output_path' => $path,
+    'data' => $data,
+);
 
 $error = '';
-if (!createContractDocx($candidates, $path, $data, $error)) {
-    fail($error !== '' ? $error : 'Не удалось сформировать договор.');
+if (!runPythonContract($scriptPath, $payload, $error)) {
+    fail('Не удалось сформировать договор через Python. ' . $error);
 }
 
 if (!is_readable($path) || filesize($path) <= 1000) {
