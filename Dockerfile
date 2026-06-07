@@ -1,7 +1,7 @@
 FROM php:8.2-apache
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libcurl4-openssl-dev libzip-dev libxml2-dev libfreetype6-dev libjpeg62-turbo-dev libpng-dev libwebp-dev libonig-dev zip unzip \
+    && apt-get install -y --no-install-recommends python3 libcurl4-openssl-dev libzip-dev libxml2-dev libfreetype6-dev libjpeg62-turbo-dev libpng-dev libwebp-dev libonig-dev zip unzip \
     && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
     && docker-php-ext-install curl zip gd mbstring dom \
     && a2enmod headers \
@@ -9,8 +9,18 @@ RUN apt-get update \
 
 COPY public_html/ /var/www/html/
 
-RUN unzip -t /var/www/html/contract_template.docx >/tmp/contract_template_check.log \
-    && base64 /var/www/html/contract_template.docx > /var/www/html/contract_template.base64.txt
+RUN python3 - <<'PY'
+import base64
+import zipfile
+from pathlib import Path
+p = Path('/var/www/html/contract_template.docx')
+with zipfile.ZipFile(p, 'r') as z:
+    z.read('word/document.xml')
+Path('/var/www/html/contract_template.base64.txt').write_text(
+    base64.b64encode(p.read_bytes()).decode('ascii'),
+    encoding='ascii'
+)
+PY
 
 RUN mkdir -p /var/www/html/uploads /var/www/html/generated \
     && chown -R www-data:www-data /var/www/html/uploads /var/www/html/generated \
