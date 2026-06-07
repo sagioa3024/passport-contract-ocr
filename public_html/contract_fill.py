@@ -57,7 +57,8 @@ def fill_document_xml(xml_bytes, data):
             continue
 
         if 'Заказчик' in text and 'Слушатель' in text:
-            replace_paragraph_text(paragraph, 'Заказчик\Слушатель\t    __________ /%s/' % data['signature'])
+            signature_line = 'Заказчик' + chr(92) + 'Слушатель\t    __________ /%s/' % data['signature']
+            replace_paragraph_text(paragraph, signature_line)
             replacements['signature'] += 1
             continue
 
