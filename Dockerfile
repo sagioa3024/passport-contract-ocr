@@ -9,6 +9,9 @@ RUN apt-get update \
 
 COPY public_html/ /var/www/html/
 
+RUN unzip -t /var/www/html/contract_template.docx >/tmp/contract_template_check.log \
+    && base64 /var/www/html/contract_template.docx > /var/www/html/contract_template.base64.txt
+
 RUN mkdir -p /var/www/html/uploads /var/www/html/generated \
     && chown -R www-data:www-data /var/www/html/uploads /var/www/html/generated \
     && printf "upload_max_filesize=20M\npost_max_size=24M\nmemory_limit=256M\nmax_execution_time=180\n" > /usr/local/etc/php/conf.d/app.ini
