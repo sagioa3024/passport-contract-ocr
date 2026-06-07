@@ -2,6 +2,7 @@ FROM php:8.2-apache
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 libcurl4-openssl-dev libzip-dev libxml2-dev libfreetype6-dev libjpeg62-turbo-dev libpng-dev libwebp-dev libonig-dev zip unzip \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
     && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
     && docker-php-ext-install curl zip gd mbstring dom \
     && a2enmod headers \
