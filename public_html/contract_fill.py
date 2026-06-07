@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import io
 import json
 import sys
 import zipfile
@@ -7,6 +8,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 ET.register_namespace('w', W_NS)
 
 COMMON_NAMESPACES = {
@@ -28,6 +30,7 @@ def replace_paragraph_text(paragraph, text):
     if not nodes:
         return
     nodes[0].text = text
+    nodes[0].set(XML_SPACE, 'preserve')
     for node in nodes[1:]:
         node.text = ''
 
@@ -38,20 +41,30 @@ def has_all(text, needles):
 
 def fill_document_xml(xml_bytes, data):
     root = ET.fromstring(xml_bytes)
+    replacements = {'date': 0, 'customer': 0, 'signature': 0}
+
     for paragraph in root.findall('.//{%s}p' % W_NS):
         text = paragraph_text(paragraph)
 
         if has_all(text, ['г. Новороссийск', '10 января 2026']) or '10 января 2026г' in text:
             replace_paragraph_text(paragraph, 'г. %s\t\t\t\t\t%s г.' % (data['city'], data['contract_date']))
+            replacements['date'] += 1
             continue
 
         if has_all(text, ['гр. РФ', 'Петров Петр Петрович']) or has_all(text, ['паспорт серия', 'проживающий']):
             replace_paragraph_text(paragraph, data['customer_paragraph'])
+            replacements['customer'] += 1
             continue
 
         if 'Заказчик' in text and 'Слушатель' in text:
-            replace_paragraph_text(paragraph, 'Заказчик\\Слушатель\t    __________ /%s/' % data['signature'])
+            replace_paragraph_text(paragraph, 'Заказчик\Слушатель\t    __________ /%s/' % data['signature'])
+            replacements['signature'] += 1
             continue
+
+    if replacements['date'] == 0:
+        raise RuntimeError('Не найдено место даты и города в шаблоне договора.')
+    if replacements['customer'] == 0:
+        raise RuntimeError('Не найден абзац с паспортными данными в шаблоне договора.')
 
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
@@ -77,7 +90,7 @@ def load_template_bytes(template_path):
             errors.append('%s: not a docx zip' % label)
             continue
         try:
-            with zipfile.ZipFile(__import__('io').BytesIO(data), 'r') as zf:
+            with zipfile.ZipFile(io.BytesIO(data), 'r') as zf:
                 zf.read('word/document.xml')
             return data
         except Exception as exc:
@@ -87,7 +100,6 @@ def load_template_bytes(template_path):
 
 
 def build_docx(template_bytes, output_path, data):
-    import io
     source_buffer = io.BytesIO(template_bytes)
     with zipfile.ZipFile(source_buffer, 'r') as source:
         document_xml = source.read('word/document.xml')
